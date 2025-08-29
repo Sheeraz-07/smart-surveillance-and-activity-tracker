@@ -1,0 +1,124 @@
+# People Counter System Configuration
+# Copy this file to config.yaml and modify as needed
+
+# Video input configuration
+video:
+  # Video source: RTSP URL, MP4 file path, or camera index (0 for webcam)
+  source: "rtsp://admin:password@192.168.1.100:554/stream1"
+  # source: "sample_video.mp4"
+  # source: 0  # Webcam
+  
+  # OpenCV buffer size (1 for real-time, larger for stability)
+  buffer_size: 1
+  
+  # Reconnection settings for RTSP streams
+  reconnect_delay: 5.0        # Seconds to wait before reconnection
+  timeout_seconds: 10.0       # Connection timeout
+  max_reconnect_attempts: -1  # -1 for infinite attempts
+  
+  # Frame dropping for latency control
+  drop_threshold_ms: 1000.0   # Drop frames older than 1 second
+
+# Person detection configuration
+detector:
+  # Path to ONNX model file
+  model_path: "models/yolo11n.onnx"
+  
+  # Input image size (512 chosen for i5-6th-gen CPU sweet spot)
+  imgsz: 512
+  
+  # Detection thresholds
+  conf_threshold: 0.35        # Confidence threshold
+  nms_threshold: 0.45         # Non-maximum suppression threshold
+  
+  # Use Ultralytics wrapper (fallback to raw ONNXRuntime if false)
+  use_ultralytics: true
+  
+  # CPU optimization (4 cores for i5-6th gen)
+  num_threads: 4
+
+# Multi-object tracking configuration
+tracker:
+  # Tracker type: "norfair", "bytetrack", or "simple"
+  type: "norfair"
+  
+  # Norfair-specific settings
+  distance_threshold: 0.7     # Maximum distance for track association
+  hit_counter_max: 15         # Frames to keep track alive without detection
+  initialization_delay: 3     # Frames before track is confirmed
+  distance_function: "iou"    # "iou" or "euclidean"
+  
+  # ByteTrack-specific settings (if available)
+  track_thresh: 0.5           # Detection threshold for tracking
+  track_buffer: 30            # Frames to buffer for re-identification
+  match_thresh: 0.8           # Matching threshold for association
+
+# People counting configuration
+counter:
+  # Counting line coordinates [x, y]
+  # Adjust these based on your camera view
+  line_start: [320, 200]      # Start point of counting line
+  line_end: [320, 400]        # End point of counting line
+  
+  # Debouncing settings to prevent double counting
+  debounce_frames: 15         # Minimum frames between crossings for same track
+  debounce_time: 2.0          # Minimum time (seconds) between crossings
+  
+  # Track validation
+  min_track_length: 3         # Minimum track history before counting
+  max_track_age: 30           # Maximum frames to keep track history
+
+# Database configuration
+database:
+  # SQLite database file path
+  path: "counts.db"
+  
+  # Automatic cleanup (optional)
+  cleanup_days: 30            # Keep data for 30 days
+
+# API server configuration
+api:
+  # Enable/disable API server
+  enable: true
+  
+  # Server binding
+  host: "0.0.0.0"             # Bind to all interfaces
+  port: 8000                  # HTTP port
+  
+  # CORS settings (configure for production)
+  cors_origins: ["*"]         # Allow all origins (change for production)
+
+# Logging configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  
+  # Log file path (relative to project root)
+  file: "logs/people_counter.log"
+  
+  # Rotate log files
+  max_size_mb: 10
+  backup_count: 5
+
+# Performance tuning
+performance:
+  # Frame processing
+  max_fps: 30                 # Limit processing FPS
+  skip_frames: 0              # Skip every N frames (0 = process all)
+  
+  # Memory management
+  max_detections: 100         # Maximum detections per frame
+  cleanup_interval: 300       # Cleanup old data every 5 minutes
+
+# Calibration notes
+# 1. Position your camera to have a clear view of the counting area
+# 2. Adjust line_start and line_end to cross the path where people walk
+# 3. The line direction determines IN vs OUT:
+#    - People crossing from left to right of the line = IN
+#    - People crossing from right to left of the line = OUT
+# 4. Fine-tune conf_threshold based on your lighting conditions:
+#    - Lower values (0.25-0.35) for better detection in poor lighting
+#    - Higher values (0.4-0.6) to reduce false positives in good lighting
+# 5. Adjust debounce_time based on walking speed:
+#    - Increase for slower-moving people
+#    - Decrease for faster-moving people

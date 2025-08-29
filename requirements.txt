@@ -1,0 +1,31 @@
+# People Counter System Dependencies
+# Core ML and Computer Vision
+ultralytics>=8.0.0
+onnx>=1.14.0
+onnxruntime>=1.15.0
+onnxsim>=0.4.0
+opencv-python>=4.8.0
+supervision>=0.15.0
+
+# Multi-object tracking
+norfair>=2.2.0
+# yolox  # Optional: for ByteTrack (requires PyTorch)
+
+# Web API and async support
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=11.0
+aiosqlite>=0.19.0
+
+# Configuration and utilities
+pyyaml>=6.0
+numpy>=1.24.0
+pydantic>=2.0.0
+
+# Optional: PyTorch for ByteTrack (uncomment if needed)
+# torch>=2.0.0
+# torchvision>=0.15.0
+
+# Development and testing (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
