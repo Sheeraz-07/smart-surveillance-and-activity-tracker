@@ -280,6 +280,31 @@ class PeopleCounter:
                 tracks_info.append(track_info)
         
         return tracks_info
+    
+    def draw_lines(self, frame: np.ndarray, color: Tuple[int, int, int] = (0, 255, 0), thickness: int = 2):
+        """Draw counting line on frame for visualization.
+        
+        Args:
+            frame: Frame to draw on
+            color: Line color in BGR format
+            thickness: Line thickness
+        """
+        import cv2
+        
+        start_point = tuple(map(int, self.counting_line.start_point))
+        end_point = tuple(map(int, self.counting_line.end_point))
+        
+        # Draw the counting line
+        cv2.line(frame, start_point, end_point, color, thickness)
+        
+        # Draw line name if available
+        if hasattr(self.counting_line, 'name') and self.counting_line.name:
+            # Calculate text position (middle of line, slightly offset)
+            text_x = (start_point[0] + end_point[0]) // 2
+            text_y = (start_point[1] + end_point[1]) // 2 - 10
+            
+            cv2.putText(frame, self.counting_line.name, (text_x, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, thickness)
 
 class RegionCounter:
     """Alternative region-based counter for complex counting scenarios."""

@@ -30,6 +30,8 @@ class TrackedObject:
     track_id: int
     xyxy: np.ndarray  # [x1, y1, x2, y2]
     confidence: float
+    class_name: str = "person"
+    class_id: int = 0
     age: int = 0
     
     @property
@@ -37,6 +39,16 @@ class TrackedObject:
         """Get center point of bounding box."""
         x1, y1, x2, y2 = self.xyxy
         return ((x1 + x2) / 2, (y1 + y2) / 2)
+    
+    @property
+    def id(self) -> int:
+        """Alias for track_id for compatibility."""
+        return self.track_id
+    
+    @property
+    def bbox(self) -> np.ndarray:
+        """Alias for xyxy for compatibility."""
+        return self.xyxy
 
 class BaseTracker:
     """Base class for tracking adapters."""
@@ -74,49 +86,22 @@ class NorfairTracker(BaseTracker):
         self.distance_threshold = distance_threshold
         self.hit_counter_max = hit_counter_max
         self.initialization_delay = initialization_delay
+        self.distance_function_name = distance_function
         
-        # Create custom distance function that handles Detection objects properly
-        def custom_distance_function(detection, tracked_object):
-            """Custom distance function that converts Detection objects to proper format."""
-            try:
-                # Extract bounding boxes from Detection objects
-                if hasattr(detection, 'points') and len(detection.points) >= 2:
-                    det_x1, det_y1 = detection.points[0]
-                    det_x2, det_y2 = detection.points[1]
-                    det_bbox = np.array([det_x1, det_y1, det_x2, det_y2], dtype=np.float32)
-                else:
-                    return float('inf')  # Invalid detection
-                
-                if hasattr(tracked_object, 'last_detection') and tracked_object.last_detection is not None:
-                    if hasattr(tracked_object.last_detection, 'points') and len(tracked_object.last_detection.points) >= 2:
-                        track_x1, track_y1 = tracked_object.last_detection.points[0]
-                        track_x2, track_y2 = tracked_object.last_detection.points[1]
-                        track_bbox = np.array([track_x1, track_y1, track_x2, track_y2], dtype=np.float32)
-                    else:
-                        return float('inf')  # Invalid tracked object
-                else:
-                    return float('inf')  # No last detection
-                
-                # Calculate IoU distance
-                if distance_function == "iou":
-                    return self._calculate_iou_distance(det_bbox, track_bbox)
-                else:
-                    return self._calculate_euclidean_distance(det_bbox, track_bbox)
-                    
-            except Exception as e:
-                logger.warning(f"Distance calculation failed: {e}")
-                return float('inf')
-        
-        self.distance_function = custom_distance_function
+        # Use vectorized IoU distance function for better performance
+        if distance_function == "iou":
+            distance_func = "iou"  # Use Norfair's built-in vectorized IoU
+        else:
+            distance_func = "euclidean"  # Use Norfair's built-in vectorized Euclidean
         
         self.tracker = norfair.Tracker(
-            distance_function=self.distance_function,
+            distance_function=distance_func,
             distance_threshold=distance_threshold,
             hit_counter_max=hit_counter_max,
             initialization_delay=initialization_delay,
         )
         
-        logger.info(f"Initialized Norfair tracker with custom {distance_function} distance")
+        logger.info(f"Initialized Norfair tracker with vectorized {distance_function} distance")
     
     def _calculate_iou_distance(self, bbox1: np.ndarray, bbox2: np.ndarray) -> float:
         """Calculate IoU-based distance between two bounding boxes."""
@@ -200,7 +185,7 @@ class NorfairTracker(BaseTracker):
             if not detections:
                 # Update with empty detections to age existing tracks
                 tracked_objects = self.tracker.update(detections=[])
-                return self._convert_norfair_results(tracked_objects)
+                return self._convert_norfair_results(tracked_objects, [])
                 
             # Convert to Norfair format
             norfair_detections = self._detections_to_norfair(detections)
@@ -208,19 +193,19 @@ class NorfairTracker(BaseTracker):
             # Skip update if no valid detections after conversion
             if not norfair_detections:
                 tracked_objects = self.tracker.update(detections=[])
-                return self._convert_norfair_results(tracked_objects)
+                return self._convert_norfair_results(tracked_objects, detections)
             
             # Update tracker with converted detections
             tracked_objects = self.tracker.update(detections=norfair_detections)
             
-            return self._convert_norfair_results(tracked_objects)
+            return self._convert_norfair_results(tracked_objects, detections)
             
         except Exception as e:
             logger.error(f"Error in Norfair tracker update: {e}")
             # Return empty list on error to prevent system crash
             return []
     
-    def _convert_norfair_results(self, tracked_objects) -> List[TrackedObject]:
+    def _convert_norfair_results(self, tracked_objects, detections: List[Detection]) -> List[TrackedObject]:
         """Convert Norfair tracked objects to unified format."""
         results = []
         
@@ -240,10 +225,29 @@ class NorfairTracker(BaseTracker):
                     # Get confidence from scores
                     confidence = float(np.mean(obj.last_detection.scores))
                     
+                    # Try to match with original detection to get class info
+                    class_name = "person"
+                    class_id = 0
+                    
+                    # Find closest detection to get class info
+                    track_center = ((x1 + x2) / 2, (y1 + y2) / 2)
+                    min_distance = float('inf')
+                    
+                    for det in detections:
+                        det_center = det.center
+                        distance = np.sqrt((track_center[0] - det_center[0])**2 + 
+                                         (track_center[1] - det_center[1])**2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            class_name = det.class_name
+                            class_id = det.class_id
+                    
                     tracked_obj = TrackedObject(
                         track_id=obj.id,
                         xyxy=np.array([x1, y1, x2, y2], dtype=np.float32),
                         confidence=confidence,
+                        class_name=class_name,
+                        class_id=class_id,
                         age=obj.age
                     )
                     results.append(tracked_obj)
@@ -318,10 +322,29 @@ class ByteTrackAdapter(BaseTracker):
             if hasattr(track, 'tlbr') and hasattr(track, 'track_id'):
                 x1, y1, x2, y2 = track.tlbr
                 
+                # Try to match with original detection to get class info
+                class_name = "person"
+                class_id = 0
+                
+                if detections:
+                    track_center = ((x1 + x2) / 2, (y1 + y2) / 2)
+                    min_distance = float('inf')
+                    
+                    for det in detections:
+                        det_center = det.center
+                        distance = np.sqrt((track_center[0] - det_center[0])**2 + 
+                                         (track_center[1] - det_center[1])**2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            class_name = det.class_name
+                            class_id = det.class_id
+                
                 tracked_obj = TrackedObject(
                     track_id=int(track.track_id),
                     xyxy=np.array([x1, y1, x2, y2]),
                     confidence=float(track.score) if hasattr(track, 'score') else 0.5,
+                    class_name=class_name,
+                    class_id=class_id,
                     age=getattr(track, 'frame_id', 0)
                 )
                 results.append(tracked_obj)
@@ -377,6 +400,8 @@ class SimpleTracker(BaseTracker):
                 det = detections[best_match]
                 track.xyxy = det.xyxy
                 track.confidence = det.confidence
+                track.class_name = det.class_name
+                track.class_id = det.class_id
                 track.age = 0
                 updated_tracks[track_id] = track
                 used_detections.add(best_match)
@@ -393,6 +418,8 @@ class SimpleTracker(BaseTracker):
                     track_id=self.next_id,
                     xyxy=det.xyxy,
                     confidence=det.confidence,
+                    class_name=det.class_name,
+                    class_id=det.class_id,
                     age=0
                 )
                 updated_tracks[self.next_id] = new_track

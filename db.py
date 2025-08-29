@@ -33,33 +33,49 @@ class CounterDB:
             await db.execute("PRAGMA cache_size=10000")
             await db.execute("PRAGMA temp_store=memory")
             
-            # Create crossings table
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS crossings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    track_id INTEGER NOT NULL,
-                    direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
-                    confidence REAL NOT NULL,
-                    x REAL NOT NULL,
-                    y REAL NOT NULL,
-                    frame_number INTEGER,
-                    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create index for faster queries
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_crossings_timestamp 
-                ON crossings(timestamp)
-            """)
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_crossings_track_direction 
-                ON crossings(track_id, direction)
-            """)
+            await self.create_tables(db)
             
             await db.commit()
             logger.info(f"Database initialized at {self.db_path}")
+    
+    async def create_tables(self, db):
+        """Create database tables if they don't exist."""
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS crossings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                track_id INTEGER NOT NULL,
+                direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+                confidence REAL NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                frame_number INTEGER,
+                processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                track_id INTEGER NOT NULL,
+                activity TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                duration_seconds REAL
+            )
+        ''')
+        
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_crossings_timestamp 
+            ON crossings(timestamp)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_crossings_track_direction 
+            ON crossings(track_id, direction)
+        """)
+        
+        await db.commit()
+        logger.info("Database tables created/verified")
     
     async def log_crossing(self, track_id: int, direction: str, 
                           confidence: float, x: float, y: float,
@@ -213,6 +229,31 @@ class CounterDB:
         except Exception as e:
             logger.error(f"Failed to cleanup old data: {e}")
             return 0
+    
+    async def log_activity(self, track_id: int, activity: str, 
+                          confidence: float, duration_seconds: Optional[float] = None) -> None:
+        """Log an activity event to database.
+        
+        Args:
+            track_id: Unique track identifier
+            activity: Activity type (e.g., 'walking', 'sitting', 'standing')
+            confidence: Activity classification confidence score
+            duration_seconds: Optional duration of the activity in seconds
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT INTO activities 
+                    (track_id, activity, confidence, duration_seconds)
+                    VALUES (?, ?, ?, ?)
+                """, (track_id, activity, confidence, duration_seconds))
+                await db.commit()
+                
+            logger.debug(f"Logged activity: track={track_id}, activity={activity}, "
+                        f"conf={confidence:.2f}, duration={duration_seconds}")
+                        
+        except Exception as e:
+            logger.error(f"Failed to log activity: {e}")
 
 # Synchronous wrapper for compatibility
 class SyncCounterDB:
@@ -242,6 +283,17 @@ class SyncCounterDB:
                     y REAL NOT NULL,
                     frame_number INTEGER,
                     processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS activities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    track_id INTEGER NOT NULL,
+                    activity TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    duration_seconds REAL
                 )
             """)
             

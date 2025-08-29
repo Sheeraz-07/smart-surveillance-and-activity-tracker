@@ -2,6 +2,13 @@
 ONNX-based person detection module optimized for CPU inference.
 Supports both Ultralytics YOLO and raw ONNXRuntime approaches.
 """
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU usage
+
+import warnings
+warnings.filterwarnings('ignore')
+
 import logging
 import numpy as np
 from typing import List, Tuple, Optional, Union
@@ -25,17 +32,19 @@ logger = logging.getLogger(__name__)
 class Detection:
     """Single detection result."""
     
-    def __init__(self, xyxy: np.ndarray, confidence: float, class_id: int = 0):
+    def __init__(self, xyxy: np.ndarray, confidence: float, class_id: int = 0, class_name: str = "person"):
         """Initialize detection.
         
         Args:
             xyxy: Bounding box coordinates [x1, y1, x2, y2]
             confidence: Detection confidence score
             class_id: Class ID (0 for person)
+            class_name: Human-readable class name
         """
         self.xyxy = xyxy.astype(np.float32)
         self.confidence = confidence
         self.class_id = class_id
+        self.class_name = class_name
     
     @property
     def center(self) -> Tuple[float, float]:
@@ -50,15 +59,27 @@ class Detection:
         return (x2 - x1) * (y2 - y1)
 
 class PersonDetector:
-    """ONNX-based person detector with CPU optimization."""
+    """ONNX-based multi-object detector with CPU optimization."""
+    
+    # COCO class mapping for relevant objects
+    COCO_CLASSES = {
+        0: 'person', 39: 'bottle', 41: 'cup', 63: 'laptop', 67: 'cell phone',
+        73: 'book', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'
+    }
+    
+    # Activity-relevant object mapping
+    ACTIVITY_OBJECTS = {
+        'person': 0, 'bottle': 39, 'cup': 41, 'laptop': 63, 'cell phone': 67, 'book': 73
+    }
     
     def __init__(self, 
                  model_path: str = "models/yolo11n.onnx",
-                 imgsz: int = 512,  # CPU sweet spot for i5-6th gen
-                 conf_threshold: float = 0.35,
-                 nms_threshold: float = 0.45,
+                 imgsz: int = 416,  # Optimized for performance
+                 conf_threshold: float = 0.4,
+                 nms_threshold: float = 0.5,
                  use_ultralytics: bool = True,
-                 num_threads: int = 4):  # 4 cores for i5-6th gen
+                 num_threads: int = 6,
+                 detect_objects: bool = True):  # Enable object detection
         """Initialize person detector.
         
         Args:
@@ -74,6 +95,7 @@ class PersonDetector:
         self.conf_threshold = conf_threshold
         self.nms_threshold = nms_threshold
         self.num_threads = num_threads
+        self.detect_objects = detect_objects
         
         self.model = None
         self.session = None
@@ -141,14 +163,14 @@ class PersonDetector:
             logger.error(f"Failed to initialize ONNXRuntime: {e}")
             raise
     
-    def preprocess(self, frame: np.ndarray) -> np.ndarray:
+    def preprocess(self, frame: np.ndarray) -> Tuple[np.ndarray, float, Tuple[int, int]]:
         """Preprocess frame for inference.
         
         Args:
             frame: Input BGR frame
             
         Returns:
-            Preprocessed tensor ready for inference
+            Tuple of (preprocessed tensor, scale, offset)
         """
         # Resize maintaining aspect ratio
         h, w = frame.shape[:2]
@@ -194,23 +216,26 @@ class PersonDetector:
         if len(outputs.shape) == 3:
             outputs = outputs[0]  # Remove batch dimension
         
-        # Filter by confidence and class (person = 0)
-        if outputs.shape[1] > 5:  # Has class predictions
-            confidences = outputs[:, 4]
-            class_probs = outputs[:, 5:]
-            person_scores = confidences * class_probs[:, 0]  # Person class
-            valid_mask = person_scores > self.conf_threshold
+        # Extract confidence scores and class IDs
+        confidences = outputs[:, 4]
+        class_ids = outputs[:, 5].astype(int)
+        
+        # Filter based on detection mode
+        if self.detect_objects:
+            # Keep activity-relevant objects
+            relevant_classes = list(self.ACTIVITY_OBJECTS.values())
+            valid_mask = np.isin(class_ids, relevant_classes) & (confidences >= self.conf_threshold)
         else:
-            # Simple format: [x, y, w, h, conf]
-            person_scores = outputs[:, 4]
-            valid_mask = person_scores > self.conf_threshold
+            # Only keep person detections (class_id = 0)
+            valid_mask = (class_ids == 0) & (confidences >= self.conf_threshold)
         
         if not np.any(valid_mask):
             return detections
         
         # Filter detections
         valid_outputs = outputs[valid_mask]
-        valid_scores = person_scores[valid_mask]
+        valid_scores = confidences[valid_mask]
+        valid_class_ids = class_ids[valid_mask]
         
         # Convert to xyxy format
         boxes = valid_outputs[:, :4].copy()
@@ -229,18 +254,18 @@ class PersonDetector:
         if len(indices) > 0:
             indices = indices.flatten()
             
-            for i in indices:
-                box = boxes[i]
-                conf = valid_scores[i]
+            for idx in indices:
+                x1, y1, x2, y2 = boxes[idx]
+                conf = valid_scores[idx]
+                class_id = valid_class_ids[idx]
                 
-                # Convert back to original coordinates
-                x1, y1, x2, y2 = box
+                # Apply scale and offset corrections
                 x1 = (x1 - offset[0]) / scale
                 y1 = (y1 - offset[1]) / scale
                 x2 = (x2 - offset[0]) / scale
                 y2 = (y2 - offset[1]) / scale
                 
-                # Clip to frame bounds
+                # Clamp to frame boundaries
                 h, w = orig_shape
                 x1 = max(0, min(x1, w))
                 y1 = max(0, min(y1, h))
@@ -251,17 +276,63 @@ class PersonDetector:
                 if x2 <= x1 or y2 <= y1:
                     continue
                 
+                class_name = self.COCO_CLASSES.get(int(class_id), f"class_{int(class_id)}")
                 detection = Detection(
                     xyxy=np.array([x1, y1, x2, y2]),
                     confidence=float(conf),
-                    class_id=0
+                    class_id=int(class_id),
+                    class_name=class_name
                 )
                 detections.append(detection)
         
         return detections
     
+    def _postprocess_ultralytics(self, results) -> List[Detection]:
+        """Postprocess Ultralytics YOLO results to Detection objects.
+        
+        Args:
+            results: Ultralytics YOLO results
+            
+        Returns:
+            List of Detection objects
+        """
+        detections = []
+        
+        for result in results:
+            if result.boxes is not None:
+                boxes = result.boxes.xyxy.cpu().numpy()
+                confidences = result.boxes.conf.cpu().numpy()
+                class_ids = result.boxes.cls.cpu().numpy().astype(int)
+                
+                for i, (box, conf, class_id) in enumerate(zip(boxes, confidences, class_ids)):
+                    # Filter based on detection mode
+                    if self.detect_objects:
+                        # Keep activity-relevant objects
+                        relevant_classes = list(self.ACTIVITY_OBJECTS.values())
+                        if class_id not in relevant_classes:
+                            continue
+                    else:
+                        # Only keep person detections (class_id = 0)
+                        if class_id != 0:
+                            continue
+                    
+                    # Skip low confidence detections
+                    if conf < self.conf_threshold:
+                        continue
+                    
+                    class_name = self.COCO_CLASSES.get(int(class_id), f"class_{int(class_id)}")
+                    detection = Detection(
+                        xyxy=box,
+                        confidence=float(conf),
+                        class_id=int(class_id),
+                        class_name=class_name
+                    )
+                    detections.append(detection)
+        
+        return detections
+
     def detect(self, frame: np.ndarray) -> List[Detection]:
-        """Detect persons in frame.
+        """Detect objects in frame.
         
         Args:
             frame: Input BGR frame
@@ -272,47 +343,25 @@ class PersonDetector:
         if frame is None or frame.size == 0:
             return []
         
-        orig_shape = frame.shape[:2]
-        
         try:
-            if self.model is not None:  # Ultralytics
-                results = self.model(frame, imgsz=self.imgsz, conf=self.conf_threshold, verbose=False)
-                
-                detections = []
-                for result in results:
-                    if result.boxes is not None:
-                        boxes = result.boxes.xyxy.cpu().numpy()
-                        confidences = result.boxes.conf.cpu().numpy()
-                        classes = result.boxes.cls.cpu().numpy()
-                        
-                        # Filter for person class (0)
-                        person_mask = classes == 0
-                        
-                        for box, conf in zip(boxes[person_mask], confidences[person_mask]):
-                            detection = Detection(
-                                xyxy=box,
-                                confidence=float(conf),
-                                class_id=0
-                            )
-                            detections.append(detection)
-                
-                return detections
-                
-            elif self.session is not None:  # Raw ONNXRuntime
-                # Preprocess
+            if self.model:
+                # Use Ultralytics
+                results = self.model(frame, imgsz=self.imgsz, conf=self.conf_threshold, 
+                                   iou=self.nms_threshold, verbose=False)
+                return self._postprocess_ultralytics(results)
+            elif self.session:
+                # Use raw ONNXRuntime
                 tensor, scale, offset = self.preprocess(frame)
-                
-                # Inference
+                orig_shape = frame.shape[:2]
                 outputs = self.session.run(self.output_names, {self.input_name: tensor})
-                
-                # Postprocess
                 return self.postprocess(outputs[0], scale, offset, orig_shape)
-            
+            else:
+                logger.error("No model loaded")
+                return []
+                
         except Exception as e:
             logger.error(f"Detection failed: {e}")
             return []
-        
-        return []
     
     def get_model_info(self) -> dict:
         """Get model information."""

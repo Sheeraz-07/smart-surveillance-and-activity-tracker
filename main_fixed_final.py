@@ -107,67 +107,24 @@ class PeopleCounterSystem:
         try:
             # Initialize detector with object detection enabled
             detector_config = self.config.get('detector', {})
-            self.detector = PersonDetector(
-                model_path=detector_config.get('model_path', 'yolo11n.onnx'),
-                imgsz=detector_config.get('imgsz', 416),
-                conf_threshold=detector_config.get('conf_threshold', 0.4),
-                nms_threshold=detector_config.get('nms_threshold', 0.5),
-                use_ultralytics=detector_config.get('use_ultralytics', True),
-                num_threads=detector_config.get('num_threads', 6),
-                detect_objects=True  # Enable multi-object detection
-            )
+            detector_config['detect_objects'] = True  # Enable multi-object detection
+            self.detector = PersonDetector(detector_config)
             
             # Initialize tracker
             tracker_config = self.config.get('tracker', {})
-            tracker_type = tracker_config.get('type', 'norfair')
-            
-            # Prepare tracker-specific parameters
-            tracker_params = {}
-            if tracker_type == 'norfair':
-                tracker_params = {
-                    'distance_threshold': tracker_config.get('distance_threshold', 0.7),
-                    'hit_counter_max': tracker_config.get('hit_counter_max', 15),
-                    'initialization_delay': tracker_config.get('initialization_delay', 3),
-                    'distance_function': tracker_config.get('distance_function', 'iou')
-                }
-            elif tracker_type == 'bytetrack':
-                tracker_params = {
-                    'track_thresh': tracker_config.get('track_thresh', 0.5),
-                    'track_buffer': tracker_config.get('track_buffer', 30),
-                    'match_thresh': tracker_config.get('match_thresh', 0.8)
-                }
-            
-            self.tracker = TrackerManager(tracker_type=tracker_type, **tracker_params)
+            self.tracker = TrackerManager(tracker_config)
             
             # Initialize counter
             counter_config = self.config.get('counter', {})
-            from counter import CrossingLine
-            counting_line = CrossingLine(
-                start_point=tuple(counter_config.get('line_start', [0, 240])),
-                end_point=tuple(counter_config.get('line_end', [640, 240])),
-                name="main_line"
-            )
-            self.counter = PeopleCounter(
-                counting_line=counting_line,
-                debounce_frames=counter_config.get('debounce_frames', 15),
-                debounce_time=counter_config.get('debounce_time', 2.0),
-                min_track_length=counter_config.get('min_track_length', 3),
-                max_track_age=counter_config.get('max_track_age', 30)
-            )
+            self.counter = PeopleCounter(counter_config)
             
             # Initialize activity classifier
             activity_config = self.config.get('activity_classifier', {})
-            self.activity_classifier = ActivityClassifier(
-                history_length=activity_config.get('history_length', 30),
-                min_confidence=activity_config.get('min_confidence', 0.6)
-            )
+            self.activity_classifier = ActivityClassifier(activity_config)
             
             # Initialize interval-based activity classifier
             interval_config = self.config.get('interval_classifier', {})
-            self.interval_classifier = IntervalActivityClassifier(
-                interval_duration=interval_config.get('interval_duration', 5.0),
-                overlap_duration=interval_config.get('overlap_duration', 1.0)
-            )
+            self.interval_classifier = IntervalActivityClassifier(interval_config)
             
             # Initialize database
             db_config = self.config.get('database', {})
@@ -178,22 +135,16 @@ class PeopleCounterSystem:
             api_config = self.config.get('api', {})
             if api_config.get('enabled', True):
                 self.api_server = PeopleCounterAPI(
-                    db_path=api_config.get('db_path', 'counts.db')
+                    host=api_config.get('host', '0.0.0.0'),
+                    port=api_config.get('port', 8000)
                 )
                 # Start API server in background
-                api_thread = threading.Thread(target=self.api_server.run, daemon=True)
+                api_thread = threading.Thread(target=self.api_server.start, daemon=True)
                 api_thread.start()
             
             # Initialize video capture
-            video_config = self.config.get('video', {})
-            self.capture = VideoCapture(
-                source=video_config.get('source', 0),
-                buffer_size=video_config.get('buffer_size', 1),
-                reconnect_delay=video_config.get('reconnect_delay', 5.0),
-                max_reconnect_attempts=video_config.get('max_reconnect_attempts', -1),
-                timeout_seconds=video_config.get('timeout_seconds', 10.0),
-                drop_threshold_ms=video_config.get('drop_threshold_ms', 1000.0)
-            )
+            capture_config = self.config.get('capture', {})
+            self.capture = VideoCapture(capture_config)
             
             self.logger.info("All components initialized successfully")
             
@@ -216,17 +167,11 @@ class PeopleCounterSystem:
             self.stats['total_crossings'] += len(crossings)
             
             # Classify activities for people
-            activities = self.activity_classifier.update(tracked_objects, frame)
             for obj in tracked_objects:
                 if obj.class_name == "person":
-                    # Get activity from classifier results
-                    if obj.track_id in activities:
-                        activity_type, confidence = activities[obj.track_id]
-                        obj.activity = activity_type.value if hasattr(activity_type, 'value') else str(activity_type)
-                        obj.activity_confidence = confidence
-                    else:
-                        obj.activity = "unknown"
-                        obj.activity_confidence = 0.0
+                    # Get pose-based activity
+                    activity = self.activity_classifier.classify(frame, obj.bbox)
+                    obj.activity = activity
             
             # Update interval classifier
             current_time = time.time()
@@ -354,7 +299,7 @@ class PeopleCounterSystem:
         
         try:
             # Initialize video capture
-            if not self.capture.connect():
+            if not self.capture.start():
                 self.logger.error("Failed to start video capture")
                 return
             
@@ -362,7 +307,7 @@ class PeopleCounterSystem:
             
             while self.running:
                 # Read frame
-                ret, frame = self.capture.read_frame()
+                ret, frame = self.capture.read()
                 if not ret:
                     self.logger.warning("Failed to read frame")
                     break

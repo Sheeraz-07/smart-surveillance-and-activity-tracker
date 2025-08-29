@@ -360,6 +360,21 @@ class PeopleCounterAPI:
         
         await self.ws_manager.broadcast(json.dumps(message))
     
+    def update_data(self, data: Dict):
+        """Update API data (synchronous wrapper for async update_counts).
+        
+        Args:
+            data: Dictionary containing counts, tracked_objects, crossings, etc.
+        """
+        # Extract counts
+        counts = data.get('counts', {'in': 0, 'out': 0, 'occupancy': 0})
+        
+        # Update current state
+        self.current_counts = counts
+        
+        # Note: WebSocket broadcasting is skipped in sync context
+        # For full functionality, use async update_counts method
+    
     def set_status(self, status: str):
         """Update system status."""
         self.system_status = status

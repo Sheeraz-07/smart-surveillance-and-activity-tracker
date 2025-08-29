@@ -66,7 +66,7 @@ if (Test-Path "requirements.txt") {
 } else {
     Write-Host "WARNING: requirements.txt not found, installing core packages..." -ForegroundColor Yellow
     try {
-        pip install ultralytics opencv-python fastapi uvicorn aiosqlite pyyaml numpy norfair --quiet
+        pip install ultralytics opencv-python fastapi uvicorn aiosqlite pyyaml numpy norfair mediapipe --quiet
         Write-Host "Core packages installed" -ForegroundColor Green
     } catch {
         Write-Host "ERROR: Failed to install core packages" -ForegroundColor Red
